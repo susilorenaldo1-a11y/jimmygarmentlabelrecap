@@ -27,11 +27,41 @@ export interface WriteResult {
   addedBarcodes: string[];
 }
 
+function normalizePrivateKey(raw: string): string {
+  let key = (raw || "").trim();
+  if (
+    (key.startsWith('"') && key.endsWith('"')) ||
+    (key.startsWith("'") && key.endsWith("'"))
+  ) {
+    key = key.slice(1, -1).trim();
+  }
+  key = key.replace(/\\n/g, "\n").replace(/\r\n?/g, "\n");
+
+  const beginRe = /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/;
+  const endRe = /-----END (?:[A-Z0-9]+ )?PRIVATE KEY-----/;
+  const bm = key.match(beginRe);
+  const em = key.match(endRe);
+  if (!bm || !em) return key;
+
+  const bodyStart = (bm.index ?? 0) + bm[0].length;
+  const bodyEnd = em.index ?? key.length;
+  const body = key.slice(bodyStart, bodyEnd).replace(/\s+/g, "");
+  if (!body) return key;
+
+  const wrapped = body.match(/.{1,64}/g)?.join("\n") ?? body;
+  return `${bm[0]}\n${wrapped}\n${em[0]}\n`;
+}
+
 function getAuth(): JWT {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const key = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-  if (!email || !key) {
-    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY");
+  const email = (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || "").trim();
+  const key = normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY || "");
+  if (!email) {
+    throw new Error("Missing GOOGLE_SERVICE_ACCOUNT_EMAIL");
+  }
+  if (!/-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/.test(key)) {
+    throw new Error(
+      "GOOGLE_PRIVATE_KEY is not a valid PEM key. Paste the full 'private_key' value from your service-account JSON, including the -----BEGIN/END PRIVATE KEY----- lines."
+    );
   }
   return new JWT({
     email,
