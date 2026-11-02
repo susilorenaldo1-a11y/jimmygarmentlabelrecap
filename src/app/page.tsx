@@ -1,13 +1,22 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { SIZE_COLUMNS } from "@/lib/constants";
 
 interface Item {
   barcode: string;
   description: string;
   colour: string;
   price: number;
+  total: number;
+  sizes: Record<string, number>;
   selected: boolean;
+}
+
+function sizesSummary(sizes: Record<string, number>): string {
+  return SIZE_COLUMNS.filter((s) => (sizes?.[s] ?? 0) > 0)
+    .map((s) => `${s} ${sizes[s]}`)
+    .join(" · ");
 }
 
 export default function Home() {
@@ -17,6 +26,8 @@ export default function Home() {
   const [parsing, setParsing] = useState(false);
   const [writing, setWriting] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [lastAdded, setLastAdded] = useState<string[]>([]);
+  const [undoing, setUndoing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const runScan = useCallback(async (f: File) => {
@@ -81,6 +92,7 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Write failed");
+      setLastAdded(data.addedBarcodes || []);
       setStatus({
         ok: true,
         msg: `Done: ${data.added} added, ${data.skipped} skipped (already exist) in "${data.sheetTitle}".`,
@@ -91,6 +103,27 @@ export default function Home() {
       setWriting(false);
     }
   }, [items]);
+
+  const undo = useCallback(async () => {
+    if (!lastAdded.length) return;
+    setUndoing(true);
+    setStatus(null);
+    try {
+      const res = await fetch("/api/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcodes: lastAdded }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Undo failed");
+      setStatus({ ok: true, msg: `Undone: ${data.deleted} row(s) removed.` });
+      setLastAdded([]);
+    } catch (e) {
+      setStatus({ ok: false, msg: e instanceof Error ? e.message : "Undo failed" });
+    } finally {
+      setUndoing(false);
+    }
+  }, [lastAdded]);
 
   const update = (idx: number, key: keyof Item, value: string | number | boolean) => {
     setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [key]: value } : it)));
@@ -152,6 +185,11 @@ export default function Home() {
             </button>
           </>
         )}
+        {lastAdded.length > 0 && (
+          <button className="ghost" onClick={undo} disabled={undoing}>
+            {undoing ? "Undoing…" : `Undo last write (${lastAdded.length})`}
+          </button>
+        )}
       </div>
 
       {status && (
@@ -167,6 +205,8 @@ export default function Home() {
               <th>STYLE # (description)</th>
               <th>COLOUR</th>
               <th style={{ width: 120 }}>UNIT PRICE (USD)</th>
+              <th style={{ width: 90 }}>TOTAL</th>
+              <th>SIZES</th>
             </tr>
           </thead>
           <tbody>
@@ -207,6 +247,16 @@ export default function Home() {
                     value={it.price}
                     onChange={(e) => update(idx, "price", parseFloat(e.target.value) || 0)}
                   />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    value={it.total}
+                    onChange={(e) => update(idx, "total", parseInt(e.target.value, 10) || 0)}
+                  />
+                </td>
+                <td style={{ color: "#555", fontSize: 13, whiteSpace: "nowrap" }}>
+                  {sizesSummary(it.sizes) || "—"}
                 </td>
               </tr>
             ))}

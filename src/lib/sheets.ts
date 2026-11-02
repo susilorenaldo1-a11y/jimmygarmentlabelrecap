@@ -1,20 +1,30 @@
 import { JWT } from "google-auth-library";
 import { GoogleSpreadsheet } from "google-spreadsheet";
+import { SIZE_COLUMNS } from "./constants";
 
-export const HEADERS = ["STYLE NUMBER", "STYLE #", "COLOUR", "UNIT PRICE (USD)"];
+export const HEADERS = [
+  "STYLE NUMBER",
+  "STYLE #",
+  "COLOUR",
+  "UNIT PRICE (USD)",
+  "TOTAL",
+  ...SIZE_COLUMNS,
+];
 
 export interface WriteRow {
   barcode: string;
   description: string;
   colour: string;
   price: number;
+  total: number;
+  sizes: Record<string, number>;
 }
 
 export interface WriteResult {
   added: number;
   skipped: number;
   sheetTitle: string;
-  items: WriteRow[];
+  addedBarcodes: string[];
 }
 
 function getAuth(): JWT {
@@ -30,6 +40,34 @@ function getAuth(): JWT {
   });
 }
 
+async function getSheet(doc: GoogleSpreadsheet, title: string) {
+  let sheet = doc.sheetsByTitle[title];
+  if (!sheet) {
+    sheet = await doc.addSheet({ title, headerValues: HEADERS });
+  }
+  await sheet.loadHeaderRow();
+  let header = sheet.headerValues || [];
+  if (!header || header.length < HEADERS.length) {
+    await sheet.setHeaderRow(HEADERS);
+    header = HEADERS;
+  }
+  return { sheet, header };
+}
+
+function rowToObject(row: WriteRow, header: string[]): Record<string, string | number> {
+  const obj: Record<string, string | number> = {
+    [header[0]]: row.barcode.trim(),
+    [header[1]]: row.description || "",
+    [header[2]]: row.colour || "",
+    [header[3]]: row.price,
+    [header[4]]: row.total,
+  };
+  SIZE_COLUMNS.forEach((size, idx) => {
+    obj[header[5 + idx]] = row.sizes?.[size] ?? 0;
+  });
+  return obj;
+}
+
 export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
   const sheetId = process.env.GOOGLE_SHEET_ID;
   if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
@@ -37,18 +75,7 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
 
   const doc = new GoogleSpreadsheet(sheetId, getAuth());
   await doc.loadInfo();
-
-  let sheet = doc.sheetsByTitle[title];
-  if (!sheet) {
-    sheet = await doc.addSheet({ title, headerValues: HEADERS });
-  }
-
-  await sheet.loadHeaderRow();
-  let header = sheet.headerValues || [];
-  if (!header || header.length < 4) {
-    await sheet.setHeaderRow(HEADERS);
-    header = HEADERS;
-  }
+  const { sheet, header } = await getSheet(doc, title);
 
   const existingRows = await sheet.getRows();
   const existingBarcodes = new Set(
@@ -56,6 +83,7 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
   );
 
   const toAdd: Record<string, string | number>[] = [];
+  const addedBarcodes: string[] = [];
   let skipped = 0;
   for (const row of rows) {
     const barcode = (row.barcode || "").trim();
@@ -64,18 +92,41 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
       skipped++;
       continue;
     }
-    toAdd.push({
-      [header[0]]: barcode,
-      [header[1]]: row.description || "",
-      [header[2]]: row.colour || "",
-      [header[3]]: row.price,
-    });
+    toAdd.push(rowToObject(row, header));
     existingBarcodes.add(barcode);
+    addedBarcodes.push(barcode);
   }
 
   if (toAdd.length) {
     await sheet.addRows(toAdd);
   }
 
-  return { added: toAdd.length, skipped, sheetTitle: title, items: rows };
+  return { added: toAdd.length, skipped, sheetTitle: title, addedBarcodes };
+}
+
+export async function deleteFromSheet(barcodes: string[]): Promise<{ deleted: number }> {
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
+  const title = process.env.GOOGLE_SHEET_TITLE || "Recap";
+
+  const doc = new GoogleSpreadsheet(sheetId, getAuth());
+  await doc.loadInfo();
+  const sheet = doc.sheetsByTitle[title];
+  if (!sheet) return { deleted: 0 };
+
+  await sheet.loadHeaderRow();
+  const header = sheet.headerValues || [];
+  const barcodeCol = header[0] || "STYLE NUMBER";
+
+  const set = new Set(barcodes.map((b) => String(b).trim()).filter(Boolean));
+  const rows = await sheet.getRows();
+  let deleted = 0;
+  for (const row of rows) {
+    const b = String(row.get(barcodeCol) ?? "").trim();
+    if (set.has(b)) {
+      await row.delete();
+      deleted++;
+    }
+  }
+  return { deleted };
 }

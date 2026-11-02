@@ -3,6 +3,8 @@ export interface ParsedItem {
   description: string;
   colour: string;
   price: number;
+  total: number;
+  sizes: Record<string, number>;
 }
 
 interface Word {
@@ -42,6 +44,44 @@ function groupLines(words: Word[]): Line[] {
   return lines;
 }
 
+function parseSizes(
+  headerLine: Line,
+  colourLine: Line
+): { total: number; sizes: Record<string, number> } {
+  const sizes: Record<string, number> = {};
+  const sizeLabels: { label: string; x: number }[] = [];
+
+  for (const w of headerLine.words) {
+    const t = w.str.trim();
+    if (t === "Colour/Size" || t === "Total") continue;
+    sizeLabels.push({ label: t, x: w.x });
+    sizes[t] = 0;
+  }
+
+  const numericWords = colourLine.words.filter((w) => isNumeric(w.str.trim()));
+  let total = 0;
+  if (numericWords.length) {
+    total = parseInt(numericWords[0].str.trim(), 10) || 0;
+  }
+
+  for (const cw of numericWords.slice(1)) {
+    let bestLabel = "";
+    let bestDist = Infinity;
+    for (const sl of sizeLabels) {
+      const d = Math.abs(cw.x - sl.x);
+      if (d < bestDist) {
+        bestDist = d;
+        bestLabel = sl.label;
+      }
+    }
+    if (bestLabel && bestDist <= 20) {
+      sizes[bestLabel] = parseInt(cw.str.trim(), 10) || 0;
+    }
+  }
+
+  return { total, sizes };
+}
+
 function parseItems(lines: Line[]): ParsedItem[] {
   const items: ParsedItem[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -59,13 +99,19 @@ function parseItems(lines: Line[]): ParsedItem[] {
     const description = i + 1 < lines.length ? lines[i + 1].text : "";
 
     let colour = "";
+    let total = parseInt(qty, 10) || 0;
+    let sizes: Record<string, number> = {};
     if (i + 3 < lines.length && lines[i + 2].text.includes("Colour/Size")) {
+      const colourLine = lines[i + 3];
       const leading: string[] = [];
-      for (const w of lines[i + 3].words) {
+      for (const w of colourLine.words) {
         if (isNumeric(w.str.trim())) break;
         leading.push(w.str.trim());
       }
       colour = leading.join(" ").trim();
+      const s = parseSizes(lines[i + 2], colourLine);
+      total = s.total || total;
+      sizes = s.sizes;
     }
 
     items.push({
@@ -73,6 +119,8 @@ function parseItems(lines: Line[]): ParsedItem[] {
       description,
       colour,
       price: parseFloat(price),
+      total,
+      sizes,
     });
   }
   return items;
