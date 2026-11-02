@@ -70,6 +70,28 @@ function getAuth(): JWT {
   });
 }
 
+export function errorMessage(e: unknown): string {
+  const err = e as { response?: { data?: unknown }; message?: string };
+  const data = err?.response?.data;
+  if (data) {
+    if (typeof data === "string") return data;
+    const api = (data as { error?: unknown }).error;
+    if (typeof api === "string") return api;
+    const apiObj = api as { message?: string; errors?: { message?: string }[] };
+    if (apiObj?.message) return apiObj.message;
+    if (Array.isArray(apiObj?.errors) && apiObj.errors.length) {
+      return apiObj.errors.map((x) => x.message).join("; ");
+    }
+  }
+  return err?.message || "Unknown error";
+}
+
+function normalizeSheetId(raw: string): string {
+  const s = (raw || "").trim();
+  const m = s.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return m ? m[1] : s;
+}
+
 async function getSheet(doc: GoogleSpreadsheet, title: string) {
   let sheet = doc.sheetsByTitle[title];
   if (!sheet) {
@@ -99,7 +121,7 @@ function rowToObject(row: WriteRow, header: string[]): Record<string, string | n
 }
 
 export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
-  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const sheetId = normalizeSheetId(process.env.GOOGLE_SHEET_ID || "");
   if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
   const title = process.env.GOOGLE_SHEET_TITLE || "Recap";
 
@@ -135,7 +157,7 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
 }
 
 export async function deleteFromSheet(barcodes: string[]): Promise<{ deleted: number }> {
-  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const sheetId = normalizeSheetId(process.env.GOOGLE_SHEET_ID || "");
   if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
   const title = process.env.GOOGLE_SHEET_TITLE || "Recap";
 

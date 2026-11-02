@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { writeToSheet, WriteRow } from "@/lib/sheets";
+import { writeToSheet, WriteRow, errorMessage } from "@/lib/sheets";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -14,7 +14,6 @@ export async function POST(req: NextRequest) {
     const result = await writeToSheet(items);
     return NextResponse.json(result);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Failed to write to sheet";
-    return NextResponse.json({ error: msg }, { status: 500 });
+    return NextResponse.json({ error: errorMessage(e) }, { status: 500 });
   }
 }
