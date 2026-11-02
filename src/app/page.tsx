@@ -19,21 +19,12 @@ export default function Home() {
   const [status, setStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const onFiles = useCallback((files: FileList | null) => {
-    if (files && files[0]) {
-      setFile(files[0]);
-      setItems([]);
-      setStatus(null);
-    }
-  }, []);
-
-  const scan = useCallback(async () => {
-    if (!file) return;
+  const runScan = useCallback(async (f: File) => {
     setParsing(true);
     setStatus(null);
     try {
       const fd = new FormData();
-      fd.append("file", file);
+      fd.append("file", f);
       const res = await fetch("/api/parse", { method: "POST", body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Parse failed");
@@ -53,7 +44,26 @@ export default function Home() {
     } finally {
       setParsing(false);
     }
-  }, [file]);
+  }, []);
+
+  const onFiles = useCallback(
+    (files: FileList | null) => {
+      if (files && files[0]) {
+        setFile(files[0]);
+        setItems([]);
+        runScan(files[0]);
+      }
+    },
+    [runScan]
+  );
+
+  const scan = useCallback(() => {
+    if (!file) {
+      inputRef.current?.click();
+      return;
+    }
+    runScan(file);
+  }, [file, runScan]);
 
   const write = useCallback(async () => {
     const selected = items.filter((it) => it.selected);
@@ -122,7 +132,7 @@ export default function Home() {
       />
 
       <div className="row">
-        <button onClick={scan} disabled={!file || parsing}>
+        <button onClick={scan} disabled={parsing}>
           {parsing ? "Scanning…" : "Scan PDF"}
         </button>
         {items.length > 0 && (
