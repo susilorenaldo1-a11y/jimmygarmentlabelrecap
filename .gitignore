@@ -1,0 +1,21 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# misc
+.DS_Store
+*.pem
+.env
+.env.local
+.env.*.local
+
+# service account key
+credentials.json
+*-service-account.json
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
