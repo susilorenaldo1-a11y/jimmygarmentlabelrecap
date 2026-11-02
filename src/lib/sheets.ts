@@ -163,11 +163,24 @@ function buildColumnMap(sheet: GoogleSpreadsheetWorksheet, headerRow: number): C
   return map;
 }
 
+function colLetter(index: number): string {
+  let s = "";
+  let n = index + 1;
+  while (n > 0) {
+    n--;
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26);
+  }
+  return s;
+}
+
 function writeItem(
   sheet: GoogleSpreadsheetWorksheet,
   rowIdx: number,
   item: WriteRow,
-  col: ColMap
+  col: ColMap,
+  sizeStart: number,
+  sizeEnd: number
 ) {
   sheet.getCell(rowIdx, col.barcode).value = item.barcode.trim();
   if (col.description >= 0) sheet.getCell(rowIdx, col.description).value = item.description || "";
@@ -181,8 +194,13 @@ function writeItem(
     }
   }
 
-  if (col.totalQty >= 0) sheet.getCell(rowIdx, col.totalQty).value = item.total;
-  if (col.totalValue >= 0) sheet.getCell(rowIdx, col.totalValue).value = item.total * item.price;
+  const a1Row = rowIdx + 1;
+  if (col.totalQty >= 0 && sizeStart >= 0 && sizeEnd >= 0) {
+    sheet.getCell(rowIdx, col.totalQty).formula = `=SUM(${colLetter(sizeStart)}${a1Row}:${colLetter(sizeEnd)}${a1Row})`;
+  }
+  if (col.totalValue >= 0 && col.totalQty >= 0 && col.price >= 0) {
+    sheet.getCell(rowIdx, col.totalValue).formula = `=${colLetter(col.price)}${a1Row}*${colLetter(col.totalQty)}${a1Row}`;
+  }
 }
 
 async function loadSheet(doc: GoogleSpreadsheet, title: string) {
@@ -205,13 +223,28 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
   await doc.loadInfo();
   const { sheet, headerRow, col } = await loadSheet(doc, title);
 
-  const existingBarcodes = new Set<string>();
+  const sizeCols = Object.values(col.sizes)
+    .filter((c) => c >= 0)
+    .sort((a, b) => a - b);
+  const managedCols = [
+    col.barcode,
+    col.description,
+    col.colour,
+    col.price,
+    col.totalQty,
+    col.totalValue,
+    ...sizeCols,
+  ].filter((c) => c >= 0);
+
+  let firstDataRow = -1;
   let lastDataRow = headerRow;
+  const existingBarcodes = new Set<string>();
   for (let r = headerRow + 1; r < sheet.rowCount; r++) {
     const b = cellText(sheet.getCell(r, col.barcode));
     if (b) {
-      existingBarcodes.add(b);
+      if (firstDataRow === -1) firstDataRow = r;
       lastDataRow = r;
+      existingBarcodes.add(b);
     }
   }
 
@@ -222,25 +255,64 @@ export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
     return true;
   });
 
-  const skipped = rows.length - toWrite.length;
+  if (toWrite.length === 0) {
+    return { added: 0, skipped: rows.length, sheetTitle: title, addedBarcodes: [] };
+  }
 
-  const neededRows = lastDataRow + 1 + toWrite.length;
-  if (neededRows > sheet.rowCount) {
-    await sheet.resize({ rowCount: neededRows + 5, columnCount: sheet.columnCount });
+  // Detect existing totals rows (rows after the data that hold sums).
+  let totalsRows = 0;
+  for (let r = lastDataRow + 1; r < sheet.rowCount; r++) {
+    let hasValue = false;
+    for (const c of managedCols) {
+      const v = sheet.getCell(r, c).value;
+      if (v !== null && v !== undefined && String(v).trim() !== "") {
+        hasValue = true;
+        break;
+      }
+    }
+    if (hasValue) totalsRows++;
+    else break;
+  }
+
+  // Clear the old totals region so new data can occupy it.
+  for (let r = lastDataRow + 1; r <= lastDataRow + totalsRows; r++) {
+    for (const c of managedCols) sheet.getCell(r, c).value = "";
+  }
+
+  const dataStart = firstDataRow === -1 ? lastDataRow + 1 : firstDataRow;
+  const writeStart = lastDataRow + 1;
+  const dataEnd = writeStart + toWrite.length - 1;
+  const totalsStart = dataEnd + 1;
+
+  if (totalsStart + 2 > sheet.rowCount) {
+    await sheet.resize({ rowCount: totalsStart + 3, columnCount: sheet.columnCount });
     await sheet.loadCells();
   }
 
-  let r = lastDataRow + 1;
+  const sizeStart = sizeCols.length ? sizeCols[0] : -1;
+  const sizeEnd = sizeCols.length ? sizeCols[sizeCols.length - 1] : -1;
+
+  let r = writeStart;
   const addedBarcodes: string[] = [];
   for (const item of toWrite) {
-    writeItem(sheet, r, item, col);
+    writeItem(sheet, r, item, col, sizeStart, sizeEnd);
     addedBarcodes.push(item.barcode.trim());
     r++;
   }
 
-  if (toWrite.length) {
-    await sheet.saveUpdatedCells();
+  // Per-size sums row.
+  for (const c of sizeCols) {
+    sheet.getCell(totalsStart, c).formula = `=SUM(${colLetter(c)}${dataStart + 1}:${colLetter(c)}${dataEnd + 1})`;
   }
+  // Grand total row (total qty + total value).
+  if (col.totalQty >= 0) {
+    sheet.getCell(totalsStart + 1, col.totalQty).formula = `=SUM(${colLetter(col.totalQty)}${dataStart + 1}:${colLetter(col.totalQty)}${dataEnd + 1})`;
+  }
+  if (col.totalValue >= 0) {
+    sheet.getCell(totalsStart + 1, col.totalValue).formula = `=SUM(${colLetter(col.totalValue)}${dataStart + 1}:${colLetter(col.totalValue)}${dataEnd + 1})`;
+  }
+
+  await sheet.saveUpdatedCells();
 
   return {
     added: toWrite.length,
