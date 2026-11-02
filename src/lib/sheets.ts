@@ -329,28 +329,33 @@ export async function deleteFromSheet(barcodes: string[]): Promise<{ deleted: nu
 
   const doc = new GoogleSpreadsheet(sheetId, getAuth());
   await doc.loadInfo();
-  const { sheet, headerRow, col } = await loadSheet(doc, title);
+  const sheet = doc.sheetsByTitle[title];
+  if (!sheet) return { deleted: 0 };
+
+  await sheet.loadCells();
+  const headerRow = findHeaderRow(sheet);
+  const col = buildColumnMap(sheet, headerRow);
 
   const set = new Set(barcodes.map((b) => String(b).trim()).filter(Boolean));
-  let deleted = 0;
+  const rowsToDelete: number[] = [];
   for (let r = headerRow + 1; r < sheet.rowCount; r++) {
-    const b = cellText(sheet.getCell(r, col.barcode));
-    if (set.has(b)) {
-      sheet.getCell(r, col.barcode).value = "";
-      if (col.description >= 0) sheet.getCell(r, col.description).value = "";
-      if (col.colour >= 0) sheet.getCell(r, col.colour).value = "";
-      if (col.price >= 0) sheet.getCell(r, col.price).value = "";
-      for (const c of Object.values(col.sizes)) {
-        if (c >= 0) sheet.getCell(r, c).value = "";
-      }
-      if (col.totalQty >= 0) sheet.getCell(r, col.totalQty).value = "";
-      if (col.totalValue >= 0) sheet.getCell(r, col.totalValue).value = "";
-      deleted++;
+    if (set.has(cellText(sheet.getCell(r, col.barcode)))) {
+      rowsToDelete.push(r);
     }
   }
 
-  if (deleted) {
-    await sheet.saveUpdatedCells();
+  // Delete bottom-up so earlier indices remain valid as rows shift up.
+  rowsToDelete.sort((a, b) => b - a);
+  for (const r of rowsToDelete) {
+    await (
+      sheet as unknown as {
+        _makeSingleUpdateRequest: (type: string, req: Record<string, unknown>) => Promise<unknown>;
+      }
+    )._makeSingleUpdateRequest("deleteRange", {
+      range: { sheetId: sheet.sheetId, startRowIndex: r, endRowIndex: r + 1 },
+      shiftDimension: "ROWS",
+    });
   }
-  return { deleted };
+
+  return { deleted: rowsToDelete.length };
 }
