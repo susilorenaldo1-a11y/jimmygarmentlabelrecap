@@ -1,15 +1,5 @@
 import { JWT } from "google-auth-library";
-import { GoogleSpreadsheet } from "google-spreadsheet";
-import { SIZE_COLUMNS } from "./constants";
-
-export const HEADERS = [
-  "STYLE NUMBER",
-  "STYLE #",
-  "COLOUR",
-  "UNIT PRICE (USD)",
-  "TOTAL",
-  ...SIZE_COLUMNS,
-];
+import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from "google-spreadsheet";
 
 export interface WriteRow {
   barcode: string;
@@ -25,6 +15,29 @@ export interface WriteResult {
   skipped: number;
   sheetTitle: string;
   addedBarcodes: string[];
+}
+
+// The PDF uses SML/MED/LRG; the "barcode rrp" tab uses S/M/L.
+const PDF_TO_SHEET_SIZE: Record<string, string> = {
+  XXS: "XXS",
+  XS: "XS",
+  SML: "S",
+  MED: "M",
+  LRG: "L",
+  XL: "XL",
+  XXL: "XXL",
+};
+
+const SHEET_SIZES = ["XXS", "XS", "S", "M", "L", "XL", "XXL"];
+
+interface ColMap {
+  barcode: number;
+  description: number;
+  colour: number;
+  price: number;
+  sizes: Record<string, number>;
+  totalQty: number;
+  totalValue: number;
 }
 
 function normalizePrivateKey(raw: string): string {
@@ -92,93 +105,180 @@ function normalizeSheetId(raw: string): string {
   return m ? m[1] : s;
 }
 
-async function getSheet(doc: GoogleSpreadsheet, title: string) {
-  let sheet = doc.sheetsByTitle[title];
-  if (!sheet) {
-    sheet = await doc.addSheet({ title, headerValues: HEADERS });
-  }
-  await sheet.loadHeaderRow();
-  let header = sheet.headerValues || [];
-  if (!header || header.length < HEADERS.length) {
-    await sheet.setHeaderRow(HEADERS);
-    header = HEADERS;
-  }
-  return { sheet, header };
+function normHeader(s: string): string {
+  return (s || "").replace(/\s+/g, " ").trim().toUpperCase();
 }
 
-function rowToObject(row: WriteRow, header: string[]): Record<string, string | number> {
-  const obj: Record<string, string | number> = {
-    [header[0]]: row.barcode.trim(),
-    [header[1]]: row.description || "",
-    [header[2]]: row.colour || "",
-    [header[3]]: row.price,
-    [header[4]]: row.total,
+function cellText(cell: { value: unknown }): string {
+  return String(cell.value ?? "").trim();
+}
+
+function findHeaderRow(sheet: GoogleSpreadsheetWorksheet): number {
+  const max = Math.min(sheet.rowCount, 40);
+  for (let r = 0; r < max; r++) {
+    for (let c = 0; c < sheet.columnCount; c++) {
+      if (normHeader(cellText(sheet.getCell(r, c))) === "STYLE NUMBER") {
+        return r;
+      }
+    }
+  }
+  throw new Error("Could not find the 'STYLE NUMBER' header row in the sheet.");
+}
+
+function buildColumnMap(sheet: GoogleSpreadsheetWorksheet, headerRow: number): ColMap {
+  const map: ColMap = {
+    barcode: -1,
+    description: -1,
+    colour: -1,
+    price: -1,
+    sizes: {},
+    totalQty: -1,
+    totalValue: -1,
   };
-  SIZE_COLUMNS.forEach((size, idx) => {
-    obj[header[5 + idx]] = row.sizes?.[size] ?? 0;
-  });
-  return obj;
+  let weightCol = -1;
+  let hsCodeCol = -1;
+
+  for (let c = 0; c < sheet.columnCount; c++) {
+    const h = normHeader(cellText(sheet.getCell(headerRow, c)));
+    if (h === "STYLE NUMBER") map.barcode = c;
+    else if (h === "STYLE #") map.description = c;
+    else if (h === "COLOUR") map.colour = c;
+    else if (h.includes("UNIT PRICE") && map.price === -1) map.price = c;
+    else if (SHEET_SIZES.includes(h)) map.sizes[h] = c;
+    else if (h === "WEIGHT") weightCol = c;
+    else if (h === "HS CODE") hsCodeCol = c;
+  }
+
+  if (hsCodeCol >= 0) {
+    map.totalValue = hsCodeCol - 1;
+    map.totalQty = hsCodeCol - 2;
+  } else if (weightCol >= 0) {
+    map.totalQty = weightCol + 1;
+    map.totalValue = weightCol + 2;
+  }
+
+  if (map.barcode === -1) {
+    throw new Error("Could not locate the 'STYLE NUMBER' column.");
+  }
+  return map;
+}
+
+function writeItem(
+  sheet: GoogleSpreadsheetWorksheet,
+  rowIdx: number,
+  item: WriteRow,
+  col: ColMap
+) {
+  sheet.getCell(rowIdx, col.barcode).value = item.barcode.trim();
+  if (col.description >= 0) sheet.getCell(rowIdx, col.description).value = item.description || "";
+  if (col.colour >= 0) sheet.getCell(rowIdx, col.colour).value = item.colour || "";
+  if (col.price >= 0) sheet.getCell(rowIdx, col.price).value = item.price;
+
+  for (const [pdfSize, sheetSize] of Object.entries(PDF_TO_SHEET_SIZE)) {
+    const c = col.sizes[sheetSize];
+    if (c >= 0) {
+      sheet.getCell(rowIdx, c).value = item.sizes?.[pdfSize] ?? 0;
+    }
+  }
+
+  if (col.totalQty >= 0) sheet.getCell(rowIdx, col.totalQty).value = item.total;
+  if (col.totalValue >= 0) sheet.getCell(rowIdx, col.totalValue).value = item.total * item.price;
+}
+
+async function loadSheet(doc: GoogleSpreadsheet, title: string) {
+  const sheet = doc.sheetsByTitle[title];
+  if (!sheet) {
+    throw new Error(`Sheet tab "${title}" was not found in the spreadsheet.`);
+  }
+  await sheet.loadCells();
+  const headerRow = findHeaderRow(sheet);
+  const col = buildColumnMap(sheet, headerRow);
+  return { sheet, headerRow, col };
 }
 
 export async function writeToSheet(rows: WriteRow[]): Promise<WriteResult> {
   const sheetId = normalizeSheetId(process.env.GOOGLE_SHEET_ID || "");
   if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
-  const title = process.env.GOOGLE_SHEET_TITLE || "Recap";
+  const title = process.env.GOOGLE_SHEET_TITLE || "barcode rrp";
 
   const doc = new GoogleSpreadsheet(sheetId, getAuth());
   await doc.loadInfo();
-  const { sheet, header } = await getSheet(doc, title);
+  const { sheet, headerRow, col } = await loadSheet(doc, title);
 
-  const existingRows = await sheet.getRows();
-  const existingBarcodes = new Set(
-    existingRows.map((r) => String(r.get(header[0]) ?? "").trim())
-  );
-
-  const toAdd: Record<string, string | number>[] = [];
-  const addedBarcodes: string[] = [];
-  let skipped = 0;
-  for (const row of rows) {
-    const barcode = (row.barcode || "").trim();
-    if (!barcode) continue;
-    if (existingBarcodes.has(barcode)) {
-      skipped++;
-      continue;
+  const existingBarcodes = new Set<string>();
+  let lastDataRow = headerRow;
+  for (let r = headerRow + 1; r < sheet.rowCount; r++) {
+    const b = cellText(sheet.getCell(r, col.barcode));
+    if (b) {
+      existingBarcodes.add(b);
+      lastDataRow = r;
     }
-    toAdd.push(rowToObject(row, header));
+  }
+
+  const toWrite = rows.filter((row) => {
+    const barcode = (row.barcode || "").trim();
+    if (!barcode || existingBarcodes.has(barcode)) return false;
     existingBarcodes.add(barcode);
-    addedBarcodes.push(barcode);
+    return true;
+  });
+
+  const skipped = rows.length - toWrite.length;
+
+  const neededRows = lastDataRow + 1 + toWrite.length;
+  if (neededRows > sheet.rowCount) {
+    await sheet.resize({ rowCount: neededRows + 5, columnCount: sheet.columnCount });
+    await sheet.loadCells();
   }
 
-  if (toAdd.length) {
-    await sheet.addRows(toAdd);
+  let r = lastDataRow + 1;
+  const addedBarcodes: string[] = [];
+  for (const item of toWrite) {
+    writeItem(sheet, r, item, col);
+    addedBarcodes.push(item.barcode.trim());
+    r++;
   }
 
-  return { added: toAdd.length, skipped, sheetTitle: title, addedBarcodes };
+  if (toWrite.length) {
+    await sheet.saveUpdatedCells();
+  }
+
+  return {
+    added: toWrite.length,
+    skipped: rows.length - toWrite.length,
+    sheetTitle: title,
+    addedBarcodes,
+  };
 }
 
 export async function deleteFromSheet(barcodes: string[]): Promise<{ deleted: number }> {
   const sheetId = normalizeSheetId(process.env.GOOGLE_SHEET_ID || "");
   if (!sheetId) throw new Error("Missing GOOGLE_SHEET_ID");
-  const title = process.env.GOOGLE_SHEET_TITLE || "Recap";
+  const title = process.env.GOOGLE_SHEET_TITLE || "barcode rrp";
 
   const doc = new GoogleSpreadsheet(sheetId, getAuth());
   await doc.loadInfo();
-  const sheet = doc.sheetsByTitle[title];
-  if (!sheet) return { deleted: 0 };
-
-  await sheet.loadHeaderRow();
-  const header = sheet.headerValues || [];
-  const barcodeCol = header[0] || "STYLE NUMBER";
+  const { sheet, headerRow, col } = await loadSheet(doc, title);
 
   const set = new Set(barcodes.map((b) => String(b).trim()).filter(Boolean));
-  const rows = await sheet.getRows();
   let deleted = 0;
-  for (const row of rows) {
-    const b = String(row.get(barcodeCol) ?? "").trim();
+  for (let r = headerRow + 1; r < sheet.rowCount; r++) {
+    const b = cellText(sheet.getCell(r, col.barcode));
     if (set.has(b)) {
-      await row.delete();
+      sheet.getCell(r, col.barcode).value = "";
+      if (col.description >= 0) sheet.getCell(r, col.description).value = "";
+      if (col.colour >= 0) sheet.getCell(r, col.colour).value = "";
+      if (col.price >= 0) sheet.getCell(r, col.price).value = "";
+      for (const c of Object.values(col.sizes)) {
+        if (c >= 0) sheet.getCell(r, c).value = "";
+      }
+      if (col.totalQty >= 0) sheet.getCell(r, col.totalQty).value = "";
+      if (col.totalValue >= 0) sheet.getCell(r, col.totalValue).value = "";
       deleted++;
     }
+  }
+
+  if (deleted) {
+    await sheet.saveUpdatedCells();
   }
   return { deleted };
 }
