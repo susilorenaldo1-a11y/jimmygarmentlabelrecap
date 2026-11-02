@@ -79,9 +79,9 @@ function parseItems(lines: Line[]): ParsedItem[] {
 }
 
 export async function parsePdfBuffer(buffer: ArrayBuffer): Promise<ParsedItem[]> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const { getDocumentProxy } = await import("unpdf");
   const data = new Uint8Array(buffer);
-  const doc = await pdfjs.getDocument({ data, useSystemFonts: true }).promise;
+  const doc = await getDocumentProxy(data);
 
   const words: Word[] = [];
   for (let i = 1; i <= doc.numPages; i++) {

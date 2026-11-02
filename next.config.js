@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ["pdfjs-dist", "google-spreadsheet"],
+    serverComponentsExternalPackages: ["google-spreadsheet", "google-auth-library", "unpdf"],
   },
   webpack: (config) => {
     config.externals = [...(config.externals || []), "canvas"];
